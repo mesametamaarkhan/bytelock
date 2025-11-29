@@ -1,4 +1,4 @@
-// vault.rs
+// src/vault.rs
 use rand::RngCore;
 use serde::{Serialize, Deserialize};
 use std::fs;
@@ -34,7 +34,7 @@ pub struct VaultHeader {
     pub version: u32,
     pub salt: Vec<u8>,
 
-    // New fields for master password verification
+    // Master password verification token encrypted under the master key
     pub verif_nonce: Vec<u8>,
     pub verif_ciphertext: Vec<u8>,
 
@@ -59,7 +59,7 @@ impl VaultHeader {
     #[allow(dead_code)]
     pub fn new_with_verification(key: &[u8; 32], kdf_params: KdfParams) -> Self {
         let mut salt = vec![0u8; 16];
-        rand::rng().fill_bytes(&mut salt);
+        rand::rngs::OsRng.fill_bytes(&mut salt);
 
         // Encrypt verification message using derived key
         let (ciphertext, nonce) = crypto::encrypt(key, b"bytelock-check")
@@ -78,7 +78,7 @@ impl VaultHeader {
 pub fn create_new_vault(master_password: &str) -> std::io::Result<Vault> {
     // First generate salt
     let mut salt = vec![0u8; 16];
-    rand::rng().fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut salt);
 
     // Use default KDF params (explicit)
     let kdf_params = KdfParams::default();
@@ -141,9 +141,9 @@ pub fn change_master_password(vault: &mut Vault, old_key: &[u8;32], new_password
 
     // Generate new salt
     let mut new_salt = vec![0u8; 16];
-    rand::rng().fill_bytes(&mut new_salt);
+    rand::rngs::OsRng.fill_bytes(&mut new_salt);
 
-    // Use default/new kdf params (you might want to make this configurable later)
+    // Use default/new kdf params
     let new_kdf = KdfParams::default();
 
     // Derive new key from new_password + new_salt
@@ -153,7 +153,6 @@ pub fn change_master_password(vault: &mut Vault, old_key: &[u8;32], new_password
     // Re-encrypt entries with new_key
     let mut new_map: std::collections::HashMap<String, EncryptedEntry> = std::collections::HashMap::new();
     for (name, plaintext) in decrypted_entries {
-        // plaintext is Vec<u8>
         let (ciphertext, nonce) =
             crypto::encrypt(&new_key, &plaintext)
                 .map_err(|e| format!("Failed to encrypt entry '{}': {}", name, e))?;
