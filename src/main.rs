@@ -1,6 +1,9 @@
-use clap::{Parser, Subcommand};
+// main.rs
+use clap::{Parser, Subcommand, Args};
 mod vault;
 mod crypto;
+
+use std::io::{self, Write};
 
 #[derive(Parser)]
 #[command(name = "bytelock")]
@@ -11,20 +14,34 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Args, Clone, Debug)]
+struct AddArgs {
+    name: String,
+    /// Overwrite existing entry without prompting
+    #[arg(short, long)]
+    force: bool,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     Init,
-    Add { name: String },
+    Add(AddArgs),
     Get { name: String },
     List,
-	Remove { name: String },
+    Remove { name: String },
+    /// Update an existing entry (prompt for a new password)
+    Update { name: String },
 }
 
 fn verify_master(vault: &vault::Vault, password: &str) -> Result<[u8;32], String> {
-    let key = crypto::derive_key(password, &vault.header.salt)?;
+    // Use KDF params stored in header (if present) or defaults
+    let key = crypto::derive_key(password, &vault.header.salt, Some(&vault.header.kdf_params))?;
 
-    // Convert nonce to array
+    // Convert nonce to array (ensure length)
     let mut nonce_arr = [0u8; 24];
+    if vault.header.verif_nonce.len() != nonce_arr.len() {
+        return Err("Invalid vault verification nonce length".into());
+    }
     nonce_arr.copy_from_slice(&vault.header.verif_nonce);
 
     // Attempt to decrypt verification token
@@ -41,6 +58,16 @@ fn verify_master(vault: &vault::Vault, password: &str) -> Result<[u8;32], String
     Ok(key)
 }
 
+fn prompt_confirm(prompt: &str) -> bool {
+    print!("{} [y/N]: ", prompt);
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return false;
+    }
+    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -55,7 +82,7 @@ fn main() {
             println!("Vault created successfully.");
         }
 
-        Commands::Add { name } => {
+        Commands::Add(args) => {
             let mut vault = vault::load_vault("vault.json")
                 .expect("Failed to load vault");
 
@@ -70,14 +97,25 @@ fn main() {
                 }
             };
 
+            if vault.entries.contains_key(&args.name) && !args.force {
+                let want = prompt_confirm(&format!("Entry '{}' exists. Overwrite?", args.name));
+                if !want {
+                    println!("Aborted.");
+                    return;
+                }
+            }
+
             let pwd = rpassword::prompt_password("Enter password to store: ")
                 .expect("Failed to read password");
 
+            // Zeroize the plaintext password bytes while using them
+            let pwd_bytes = zeroize::Zeroizing::new(pwd.into_bytes());
+
             let (ciphertext, nonce) =
-                crypto::encrypt(&key, pwd.as_bytes()).expect("Encryption failed");
+                crypto::encrypt(&key, pwd_bytes.as_ref()).expect("Encryption failed");
 
             vault.entries.insert(
-                name.clone(),
+                args.name.clone(),
                 vault::EncryptedEntry {
                     nonce: nonce.to_vec(),
                     ciphertext,
@@ -87,7 +125,7 @@ fn main() {
             vault::save_vault("vault.json", &vault)
                 .expect("Failed to save vault");
 
-            println!("Stored entry '{}'", name);
+            println!("Stored entry '{}'", args.name);
         }
 
         Commands::Get { name } => {
@@ -116,11 +154,16 @@ fn main() {
             let mut nonce_arr = [0u8; 24];
             nonce_arr.copy_from_slice(&entry.nonce);
 
+            // Decrypt into a zeroizing buffer
             let plaintext =
                 crypto::decrypt(&key, &entry.ciphertext, &nonce_arr).expect("Decryption failed");
 
-            let password = String::from_utf8(plaintext)
+            // Convert to String (we can't avoid creating a String for printing).
+            let password = String::from_utf8(plaintext.clone())
                 .expect("Stored password is not valid UTF-8");
+
+            // Zero the plaintext bytes explicitly (Zeroizing drops here)
+            let _zero = zeroize::Zeroizing::new(plaintext);
 
             println!("Password for '{}': {}", name, password);
         }
@@ -129,40 +172,93 @@ fn main() {
             let vault = vault::load_vault("vault.json")
                 .expect("Failed to load vault");
 
+            let master = rpassword::prompt_password("Master password: ")
+                .expect("failed to read password");
+
+            match verify_master(&vault, &master) {
+                Ok(_) => {},
+                Err(_) => {
+                    println!("Incorrect master password");
+                    return;
+                }
+            }
+
             println!("Entries:");
             for name in vault.entries.keys() {
                 println!("- {}", name);
             }
         }
 
-		Commands::Remove { name } => {
-			let mut vault = vault::load_vault("vault.json")
-				.expect("failed to load vault");
+        Commands::Remove { name } => {
+            let mut vault = vault::load_vault("vault.json")
+                .expect("failed to load vault");
 
-			let master = rpassword::prompt_password("Master password: ")
-				.expect("failed to read password");
+            let master = rpassword::prompt_password("Master password: ")
+                .expect("failed to read password");
 
-			match verify_master(&vault, &master) {
-				Ok(_) => {},
-				Err(_) => {
-					println!("Incorrect master password");
-					return;
-				}
-			}
+            match verify_master(&vault, &master) {
+                Ok(_) => {},
+                Err(_) => {
+                    println!("Incorrect master password");
+                    return;
+                }
+            }
 
-			let removed = vault.entries.remove(&name);
+            let removed = vault.entries.remove(&name);
 
-			match removed {
-				Some(_) => {
-					vault::save_vault("vault.json", &vault)
-						.expect("Failed to save vault");
+            match removed {
+                Some(_) => {
+                    vault::save_vault("vault.json", &vault)
+                        .expect("Failed to save vault");
 
-					println!("Removed entry '{}'", name);
-				}
-				None => {
-					println!("No such entry '{}'", name);
-				}
-			}
-		}
+                    println!("Removed entry '{}'", name);
+                }
+                None => {
+                    println!("No such entry '{}'", name);
+                }
+            }
+        }
+
+        Commands::Update { name } => {
+            let mut vault = vault::load_vault("vault.json")
+                .expect("Failed to load vault");
+
+            let master = rpassword::prompt_password("Master password: ")
+                .expect("Failed to read password");
+
+            let key = match verify_master(&vault, &master) {
+                Ok(key) => key,
+                Err(_) => {
+                    println!("Incorrect master password");
+                    return;
+                }
+            };
+
+            if !vault.entries.contains_key(&name) {
+                println!("No such entry '{}'", name);
+                return;
+            }
+
+            let pwd = rpassword::prompt_password("Enter new password to store: ")
+                .expect("Failed to read password");
+
+            let pwd_bytes = zeroize::Zeroizing::new(pwd.into_bytes());
+
+            let (ciphertext, nonce) =
+                crypto::encrypt(&key, pwd_bytes.as_ref()).expect("Encryption failed");
+
+            vault.entries.insert(
+                name.clone(),
+                vault::EncryptedEntry {
+                    nonce: nonce.to_vec(),
+                    ciphertext,
+                },
+            );
+
+            vault::save_vault("vault.json", &vault)
+                .expect("Failed to save vault");
+
+            println!("Updated entry '{}'", name);
+        }
     }
 }
