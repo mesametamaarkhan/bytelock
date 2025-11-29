@@ -17,6 +17,7 @@ enum Commands {
     Add { name: String },
     Get { name: String },
     List,
+	Remove { name: String },
 }
 
 fn verify_master(vault: &vault::Vault, password: &str) -> Result<[u8;32], String> {
@@ -133,5 +134,35 @@ fn main() {
                 println!("- {}", name);
             }
         }
+
+		Commands::Remove { name } => {
+			let mut vault = vault::load_vault("vault.json")
+				.expect("failed to load vault");
+
+			let master = rpassword::prompt_password("Master password: ")
+				.expect("failed to read password");
+
+			match verify_master(&vault, &master) {
+				Ok(_) => {},
+				Err(_) => {
+					println!("Incorrect master password");
+					return;
+				}
+			}
+
+			let removed = vault.entries.remove(&name);
+
+			match removed {
+				Some(_) => {
+					vault::save_vault("vault.json", &vault)
+						.expect("Failed to save vault");
+
+					println!("Removed entry '{}'", name);
+				}
+				None => {
+					println!("No such entry '{}'", name);
+				}
+			}
+		}
     }
 }
