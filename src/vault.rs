@@ -120,3 +120,56 @@ pub fn save_vault(path: &str, vault: &Vault) -> std::io::Result<()> {
     
     fs::write(path, json)
 }
+
+/// Change master password and re-encrypt entries.
+/// - `old_key` is the 32-byte derived key for the old password (already verified).
+/// - `new_password` is the new master password (plaintext).
+pub fn change_master_password(vault: &mut Vault, old_key: &[u8;32], new_password: &str) -> Result<(), String> {
+    // Decrypt all entries with old_key
+    let mut decrypted_entries: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
+    for (name, entry) in &vault.entries {
+        let mut nonce_arr = [0u8; 24];
+        if entry.nonce.len() != nonce_arr.len() {
+            return Err(format!("Invalid nonce length for entry '{}'", name));
+        }
+        nonce_arr.copy_from_slice(&entry.nonce);
+
+        let plaintext = crypto::decrypt(old_key, &entry.ciphertext, &nonce_arr)
+            .map_err(|e| format!("Failed to decrypt entry '{}': {}", name, e))?;
+        decrypted_entries.insert(name.clone(), plaintext);
+    }
+
+    // Generate new salt
+    let mut new_salt = vec![0u8; 16];
+    rand::rng().fill_bytes(&mut new_salt);
+
+    // Use default/new kdf params (you might want to make this configurable later)
+    let new_kdf = KdfParams::default();
+
+    // Derive new key from new_password + new_salt
+    let new_key = crypto::derive_key(new_password, &new_salt, Some(&new_kdf))
+        .map_err(|e| format!("Failed deriving new key: {}", e))?;
+
+    // Re-encrypt entries with new_key
+    let mut new_map: std::collections::HashMap<String, EncryptedEntry> = std::collections::HashMap::new();
+    for (name, plaintext) in decrypted_entries {
+        // plaintext is Vec<u8>
+        let (ciphertext, nonce) =
+            crypto::encrypt(&new_key, &plaintext)
+                .map_err(|e| format!("Failed to encrypt entry '{}': {}", name, e))?;
+        new_map.insert(name, EncryptedEntry { nonce: nonce.to_vec(), ciphertext });
+    }
+
+    // Recreate verification token encrypted under new key
+    let (verif_ct, verif_nonce) = crypto::encrypt(&new_key, b"bytelock-check")
+        .map_err(|e| format!("Failed to re-encrypt verification token: {}", e))?;
+
+    // Update vault header and entries
+    vault.header.salt = new_salt;
+    vault.header.kdf_params = new_kdf;
+    vault.header.verif_nonce = verif_nonce.to_vec();
+    vault.header.verif_ciphertext = verif_ct;
+    vault.entries = new_map;
+
+    Ok(())
+}

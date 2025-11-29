@@ -29,8 +29,8 @@ enum Commands {
     Get { name: String },
     List,
     Remove { name: String },
-    /// Update an existing entry (prompt for a new password)
     Update { name: String },
+    Passwd,
 }
 
 fn verify_master(vault: &vault::Vault, password: &str) -> Result<[u8;32], String> {
@@ -259,6 +259,47 @@ fn main() {
                 .expect("Failed to save vault");
 
             println!("Updated entry '{}'", name);
+        }
+
+        Commands::Passwd => {
+            // Change master password: decrypt everything with old key, re-encrypt with new key,
+            // update salt, kdf_params, and verification ciphertext/nonce.
+            let mut vault = vault::load_vault("vault.json")
+                .expect("Failed to load vault");
+
+            let old = rpassword::prompt_password("Old master password: ")
+                .expect("Failed to read password");
+
+            // Verify old
+            let old_key = match verify_master(&vault, &old) {
+                Ok(k) => k,
+                Err(_) => {
+                    println!("Incorrect master password");
+                    return;
+                }
+            };
+
+            let new = rpassword::prompt_password("New master password: ")
+                .expect("Failed to read password");
+            let new2 = rpassword::prompt_password("Confirm new master password: ")
+                .expect("Failed to read password");
+
+            if new != new2 {
+                println!("New passwords do not match.");
+                return;
+            }
+
+            // perform re-encryption using vault helper
+            match vault::change_master_password(&mut vault, &old_key, &new) {
+                Ok(_) => {
+                    vault::save_vault("vault.json", &vault)
+                        .expect("Failed to save vault");
+                    println!("Master password updated successfully.");
+                }
+                Err(e) => {
+                    println!("Failed to change master password: {}", e);
+                }
+            }
         }
     }
 }
