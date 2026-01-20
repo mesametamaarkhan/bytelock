@@ -114,17 +114,35 @@ cargo run -- gen -l 24
 ## Project Structure
 
 ```
-src/
-├─ main.rs        # CLI and command handling
-├─ crypto.rs      # Encryption and key derivation
-└─ vault.rs       # Vault structure, persistence, and master password management
+.
+├── Cargo.lock
+├── Cargo.toml
+├── README.md
+└── src/
+    ├── auth.rs
+    ├── cli.rs
+    ├── commands/
+    │   ├── add.rs
+    │   ├── gen_pw.rs
+    │   ├── get.rs
+    │   ├── init.rs
+    │   ├── list.rs
+    │   ├── mod.rs
+    │   ├── passwd.rs
+    │   ├── remove.rs
+    │   └── update.rs
+    ├── crypto.rs
+    ├── main.rs
+    ├── ui.rs
+    └── vault.rs
 ```
+
 
 ---
 
 ## License
 
-MIT License © 2025 [Your Name]
+MIT License © 2026 Mesam E Tamaar Khan
 
 ---
 
